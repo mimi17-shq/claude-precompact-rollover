@@ -1,0 +1,13 @@
+node_modules/
+.build/
+.claude-rollover/
+rebuild-runtime/
+*.jsonl
+*.log
+*.tmp
+*.bak
+.env
+.env.*
+*token*
+*secret*
+*credential*

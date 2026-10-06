@@ -1,0 +1,29 @@
+{
+  "retainTokens": 12000,
+  "defaultProfile": "200k",
+  "oneMillionModels": [
+    "replace-with-your-1m-model-id"
+  ],
+  "nextWindow": {
+    "model": "replace-with-your-next-model-id",
+    "effort": "high"
+  },
+  "pollSeconds": 2,
+  "stableSeconds": 15,
+  "profiles": {
+    "200k": {
+      "contextWindow": 200000,
+      "prepareAt": 140000,
+      "warnAt": 155000,
+      "rolloverAt": 160000,
+      "autoRollover": true
+    },
+    "1m": {
+      "contextWindow": 1000000,
+      "autoRollover": false
+    }
+  },
+  "prepare": {
+    "message": "Please save durable memories now; this window will roll over after the current reply."
+  }
+}

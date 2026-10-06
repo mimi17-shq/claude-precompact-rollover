@@ -1,0 +1,29 @@
+{
+  "name": "claude-precompact-rollover",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Preserve recent verbatim Claude Code conversation before or after context compaction.",
+  "type": "module",
+  "bin": {
+    "claude-precompact-rollover": "src/cli.mjs"
+  },
+  "scripts": {
+    "test": "bun test",
+    "check": "bun test && bun build --target=bun src/cli.mjs src/rebuild.ts --outdir .build"
+  },
+  "dependencies": {
+    "@anthropic-ai/claude-agent-sdk": "0.3.290"
+  },
+  "engines": {
+    "bun": ">=1.2.0"
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/mimi17-shq/claude-precompact-rollover.git"
+  },
+  "homepage": "https://github.com/mimi17-shq/claude-precompact-rollover#readme",
+  "bugs": {
+    "url": "https://github.com/mimi17-shq/claude-precompact-rollover/issues"
+  },
+  "license": "MIT"
+}

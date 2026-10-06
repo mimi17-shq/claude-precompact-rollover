@@ -1,0 +1,3 @@
+This project interoperates with the external @anthropic-ai/claude-agent-sdk package.
+That dependency is not distributed as part of this repository and is governed by
+Anthropic's applicable terms. Claude and Claude Code are trademarks of Anthropic.
