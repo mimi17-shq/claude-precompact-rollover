@@ -4,6 +4,8 @@ Preserve the latest **X tokens of verbatim conversation** before Claude Code com
 
 The project is aimed first at ordinary 200k-context users who would rather start a clean window than spend quota recovering the tone and details lost in an automatic summary.
 
+📌 **[中文产品案例：如何在自动压缩前安全接续长会话](docs/PRODUCT_CASE_ZH.md)**
+
 ## What it does
 
 - At 140k prompt tokens, emits a preparation reminder so the current model can save durable memories.
