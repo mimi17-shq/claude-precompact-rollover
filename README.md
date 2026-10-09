@@ -4,7 +4,11 @@ Preserve the latest **X tokens of verbatim conversation** before Claude Code com
 
 The project is aimed first at ordinary 200k-context users who would rather start a clean window than spend quota recovering the tone and details lost in an automatic summary.
 
-📌 **[中文产品案例：如何在自动压缩前安全接续长会话](docs/PRODUCT_CASE_ZH.md)**
+## 产品视角
+
+针对 Claude Code 长会话自动压缩后细节可能丢失的问题，我提出并定义了分阶段提醒、完整原文保留、压缩后救援和 SHA-256 内容校验流程，让上下文接续可以被检查和验证。
+
+我负责提出需求、确定产品方案与验收标准；代码实现和自动化测试由 AI 完成。完整过程见 **[中文产品案例：如何在自动压缩前安全接续长会话](docs/PRODUCT_CASE_ZH.md)**。
 
 ## What it does
 
