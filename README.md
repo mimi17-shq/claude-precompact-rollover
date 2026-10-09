@@ -10,6 +10,10 @@ The project is aimed first at ordinary 200k-context users who would rather start
 
 我负责提出需求、确定产品方案与验收标准；代码实现和自动化测试由 AI 完成。完整过程见 **[中文产品案例：如何在自动压缩前安全接续长会话](docs/PRODUCT_CASE_ZH.md)**。
 
+<img src="assets/rollover-product-flow.svg" alt="Telegram 风格移动端自动换窗体验示意图：日常对话、记忆提醒、模型与 effort 选择、换窗完成后继续对话" width="100%">
+
+*合成体验示意图，不包含真实聊天内容；移动端交互属于集成层，本仓库提供换窗核心。*
+
 ## What it does
 
 - At 140k prompt tokens, emits a preparation reminder so the current model can save durable memories.
