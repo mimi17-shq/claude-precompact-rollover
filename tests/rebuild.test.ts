@@ -56,7 +56,30 @@ describe("mechanical rebuild", () => {
     await mkdir(cwd, { recursive: true });
     await mkdir(transcriptDir, { recursive: true });
     const entries = [
-      ...pair(sessionId, cwd, 1, 3000),
+      ...pair(sessionId, cwd, 1, 3000).flatMap((entry, index) => index === 0 ? [entry, {
+        type: "assistant",
+        uuid: "60000000-0000-4000-8000-000000000001",
+        parentUuid: entry.uuid,
+        sessionId,
+        cwd,
+        message: {
+          role: "assistant",
+          content: [{ type: "tool_use", id: "toolu_delivery_1", name: "deliver_reply", input: { text: "selected assistant reply" } }],
+          stop_reason: null,
+        },
+      }, {
+        type: "user",
+        uuid: "70000000-0000-4000-8000-000000000001",
+        parentUuid: "60000000-0000-4000-8000-000000000001",
+        sessionId,
+        cwd,
+        origin: { kind: "tool" },
+        promptSource: "tool",
+        message: {
+          role: "user",
+          content: [{ type: "tool_result", tool_use_id: "toolu_delivery_1", content: "delivered" }],
+        },
+      }] : [{ ...entry, parentUuid: "70000000-0000-4000-8000-000000000001" }]),
       ...pair(sessionId, cwd, 2, 3000),
       { type: "system", subtype: "compact_boundary", uuid: "40000000-0000-4000-8000-000000000001", sessionId, cwd },
       { type: "user", uuid: "50000000-0000-4000-8000-000000000001", parentUuid: null, sessionId, cwd, isCompactSummary: true, message: { role: "user", content: "automatic compact summary" } },
@@ -67,7 +90,7 @@ describe("mechanical rebuild", () => {
       version: 1,
       sourceSessionId: sessionId,
       retainTokens: 1000,
-      pinnedMessageIds: ["10000000-0000-4000-8000-000000000001"],
+      pinnedMessageIds: ["60000000-0000-4000-8000-000000000001"],
       hiddenMessageIds: ["20000000-0000-4000-8000-000000000003"],
       nextWindow: { model: "synthetic-next", effort: "high" },
     }));
@@ -86,6 +109,7 @@ describe("mechanical rebuild", () => {
         CLAUDE_CONFIG_DIR: configDir,
         ROLLOVER_RETAIN_TOKENS: "1000",
         ROLLOVER_CONTEXT_PLAN_PATH: planPath,
+        ROLLOVER_DELIVERY_TOOLS: "deliver_reply",
       },
       stdout: "pipe",
       stderr: "pipe",
@@ -106,7 +130,8 @@ describe("mechanical rebuild", () => {
     expect(rebuilt).not.toContain("assistant-1-");
     expect(rebuilt).not.toContain("assistant-3-");
     expect(rebuilt).toContain("context-omitted");
-    expect(rebuilt).toContain("user-1-");
+    expect(rebuilt).not.toContain("user-1-");
+    expect(rebuilt).toContain("selected assistant reply");
     expect(rebuilt).toContain("user-3-");
     const contextManifest = JSON.parse(await readFile(path.join(runtime, "context-manifest.json"), "utf8"));
     expect(contextManifest).toMatchObject({
@@ -115,5 +140,44 @@ describe("mechanical rebuild", () => {
       digestMatch: true,
     });
     expect(contextManifest.pinnedMessageTargets).toHaveLength(1);
+    expect(contextManifest.pinnedMessageTargets[0].sourceMessageId)
+      .toBe("60000000-0000-4000-8000-000000000001");
+    expect(contextManifest.pinnedMessageTargets[0].targetMessageId).toBeTruthy();
+  }, 20_000);
+
+  test("fails closed for a stale legacy conversation anchor", async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "rollover-stale-anchor-"));
+    temporaryRoots.push(root);
+    const cwd = path.join(root, "project");
+    const configDir = path.join(root, "claude-config");
+    const runtime = path.join(root, "runtime");
+    const sessionId = "30000000-0000-4000-8000-000000000002";
+    const projectKey = cwd.replace(/[^A-Za-z0-9]/g, "-");
+    const transcriptDir = path.join(configDir, "projects", projectKey);
+    await mkdir(cwd, { recursive: true });
+    await mkdir(transcriptDir, { recursive: true });
+    await mkdir(runtime, { recursive: true });
+    await writeFile(path.join(transcriptDir, `${sessionId}.jsonl`),
+      pair(sessionId, cwd, 1).map(entry => JSON.stringify(entry)).join("\n") + "\n");
+    await writeFile(path.join(runtime, "conversation-anchor.json"), JSON.stringify({
+      source_uuid: "missing-message-id",
+    }));
+
+    const child = Bun.spawn([
+      process.execPath,
+      path.resolve("src/rebuild.ts"),
+      sessionId,
+      cwd,
+      "typed",
+      runtime,
+    ], {
+      cwd: path.resolve("."),
+      env: { ...Bun.env, CLAUDE_CONFIG_DIR: configDir, ROLLOVER_RETAIN_TOKENS: "1000" },
+      stdout: "pipe",
+      stderr: "pipe",
+    });
+    const [exitCode, stderr] = await Promise.all([child.exited, new Response(child.stderr).text()]);
+    expect(exitCode).not.toBe(0);
+    expect(stderr).toContain("conversation anchors reference missing message ids");
   }, 20_000);
 });

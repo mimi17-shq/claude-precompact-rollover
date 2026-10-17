@@ -27,6 +27,8 @@ Machine-readable schema: [`schemas/context-plan.schema.json`](../schemas/context
 5. A hidden message is replaced by the same kind of structural placeholder; its text is not inherited. Hide wins when the same message is both pinned and hidden.
 6. Tool output, thinking blocks, compact summaries, and inherited usage counters are not part of the assembled visible context.
 
+Chat bridges may represent several user-visible assistant replies as delivery tool calls inside one Claude turn. Configure their comma-separated tool names in `ROLLOVER_DELIVERY_TOOLS`; preview and rebuild will then expose each delivered reply UUID as an independent message ID. Selected reply texts are merged into one structurally valid target assistant node, and `pinnedMessageTargets` maps each selected source UUID to that node.
+
 The plan is bound to `sourceSessionId`. Unknown message IDs, malformed JSON, duplicate IDs, and a mismatched session fail closed instead of silently producing a different context.
 
 Explicit CLI flags override plan values; plan values override the general rollover config. This lets a UI prepare defaults while still allowing an operator to make a one-time local choice.
@@ -63,4 +65,4 @@ An integration can update its UI pins using `pinnedMessageTargets` after switchi
 
 The pure planning helpers are exported as `claude-precompact-rollover/context-plan` for Bun or Node-side adapters. Keep transcript access on the trusted local side; do not expose raw Claude transcripts through an unauthenticated network service.
 
-The legacy `conversation-anchor.json` and `conversation-exclusions.json` runtime files remain supported for existing integrations. New integrations should use the versioned context plan.
+The legacy `conversation-anchor.json` and `conversation-exclusions.json` runtime files remain supported for existing integrations, but unknown legacy anchor IDs fail closed. New integrations should use the versioned context plan.

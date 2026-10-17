@@ -9,6 +9,7 @@ import {
   assertPlanIds,
   normalizeContextPlan,
   selectContextTurns,
+  turnMessageIds,
   typedTurnsFromEntries,
 } from "./context-plan.mjs";
 import { decideAction, inspectEntries, parseJsonl, profileForModel } from "./core.mjs";
@@ -167,8 +168,10 @@ async function main() {
     const parsed = parseJsonl(await readFile(path.resolve(options.transcript), "utf8"));
     if (parsed.invalidLines.length) throw new Error(`invalid JSONL lines: ${parsed.invalidLines.join(",")}`);
     const plan = await loadPlan(options.plan, options.session);
-    const turns = typedTurnsFromEntries(parsed.entries);
-    const available = new Set(turns.flatMap(turn => [turn.userId, turn.assistantId]).filter(Boolean));
+    const deliveryToolNames = new Set(String(process.env.ROLLOVER_DELIVERY_TOOLS || "")
+      .split(",").map(value => value.trim()).filter(Boolean));
+    const turns = typedTurnsFromEntries(parsed.entries, { deliveryToolNames });
+    const available = new Set(turns.flatMap(turnMessageIds));
     const idCheck = assertPlanIds(plan, available);
     const retainTokens = Number(options.retainTokens || plan.retainTokens || config.retainTokens);
     const selection = selectContextTurns(turns, {

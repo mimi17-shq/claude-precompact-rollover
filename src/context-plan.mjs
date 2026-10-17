@@ -84,6 +84,53 @@ export function assertPlanIds(plan, availableMessageIds) {
   return result;
 }
 
+export function assistantMessagesForTurn(turn) {
+  const messages = Array.isArray(turn?.assistantMessages)
+    ? turn.assistantMessages.filter(message => message?.id && Array.isArray(message?.content))
+    : [];
+  if (messages.length) return messages;
+  return turn?.assistantId && Array.isArray(turn?.assistantContent)
+    ? [{ id: String(turn.assistantId), content: turn.assistantContent }]
+    : [];
+}
+
+export function turnMessageIds(turn) {
+  return [...new Set([
+    String(turn?.userId || ""),
+    String(turn?.assistantId || ""),
+    ...assistantMessagesForTurn(turn).map(message => String(message.id)),
+  ].filter(Boolean))];
+}
+
+export function visibleContextTurn(turn, {
+  recent = false,
+  pinnedMessageIds = [],
+  hiddenMessageIds = [],
+} = {}) {
+  const pinned = pinnedMessageIds instanceof Set ? pinnedMessageIds : new Set(pinnedMessageIds);
+  const hidden = hiddenMessageIds instanceof Set ? hiddenMessageIds : new Set(hiddenMessageIds);
+  const userId = String(turn.userId || "");
+  const finalAssistantId = String(turn.assistantId || "");
+  const assistantMessages = assistantMessagesForTurn(turn);
+  const userVisible = !hidden.has(userId) && (recent || pinned.has(userId));
+  const finalAliasVisible = Boolean(turn?.assistantIdAggregatesMessages) && finalAssistantId && !hidden.has(finalAssistantId)
+    && (recent || pinned.has(finalAssistantId));
+  const visibleAssistantMessages = hidden.has(finalAssistantId) ? [] : assistantMessages.filter(message => {
+    const id = String(message.id);
+    return !hidden.has(id) && (recent || finalAliasVisible || pinned.has(id));
+  });
+  const assistantVisible = visibleAssistantMessages.length > 0;
+  return {
+    userVisible,
+    assistantVisible,
+    userContent: userVisible ? turn.userContent : HIDDEN_USER_PLACEHOLDER,
+    assistantContent: assistantVisible
+      ? visibleAssistantMessages.flatMap(message => message.content)
+      : HIDDEN_ASSISTANT_PLACEHOLDER,
+    visibleAssistantMessageIds: visibleAssistantMessages.map(message => String(message.id)),
+  };
+}
+
 export function selectContextTurns(turns, {
   retainTokens,
   pinnedMessageIds = [],
@@ -96,20 +143,20 @@ export function selectContextTurns(turns, {
   const hidden = new Set(hiddenMessageIds);
   const pinnedTurnIds = new Set();
   for (const turn of turns) {
-    if (pinned.has(String(turn.userId)) || pinned.has(String(turn.assistantId))) {
+    if (turnMessageIds(turn).some(id => pinned.has(id))) {
       pinnedTurnIds.add(String(turn.id));
     }
   }
   const selectedTurnIds = new Set(pinnedTurnIds);
   const recentTurnIds = new Set();
   const visibleEstimate = (turn, recent) => {
-    const userVisible = !hidden.has(String(turn.userId))
-      && (recent || pinned.has(String(turn.userId)));
-    const assistantVisible = !hidden.has(String(turn.assistantId))
-      && (recent || pinned.has(String(turn.assistantId)));
-    if (!userVisible && !assistantVisible) return 0;
-    return estimateTokens(userVisible ? turn.userContent : HIDDEN_USER_PLACEHOLDER)
-      + estimateTokens(assistantVisible ? turn.assistantContent : HIDDEN_ASSISTANT_PLACEHOLDER);
+    const visible = visibleContextTurn(turn, {
+      recent,
+      pinnedMessageIds: pinned,
+      hiddenMessageIds: hidden,
+    });
+    if (!visible.userVisible && !visible.assistantVisible) return 0;
+    return estimateTokens(visible.userContent) + estimateTokens(visible.assistantContent);
   };
   let estimatedTokens = turns
     .filter(turn => selectedTurnIds.has(String(turn.id)))
@@ -136,7 +183,10 @@ export function selectContextTurns(turns, {
   };
 }
 
-export function typedTurnsFromEntries(entries) {
+export function typedTurnsFromEntries(entries, { deliveryToolNames = [] } = {}) {
+  const deliveryTools = deliveryToolNames instanceof Set
+    ? deliveryToolNames
+    : new Set(deliveryToolNames);
   const byUuid = new Map(entries.filter(entry => entry?.uuid).map(entry => [String(entry.uuid), entry]));
   const humans = entries.filter(entry => entry?.type === "user"
     && entry?.isCompactSummary !== true
@@ -157,22 +207,42 @@ export function typedTurnsFromEntries(entries) {
     return "";
   };
   const finalByHuman = new Map();
+  const textualByHuman = new Map();
+  const deliveredByHuman = new Map();
   for (const entry of entries) {
     if (entry?.type !== "assistant" || !Array.isArray(entry?.message?.content)) continue;
     const text = entry.message.content.filter(block => block?.type === "text" && typeof block?.text === "string");
-    if (!text.length || !new Set(["end_turn", "stop_sequence"]).has(entry?.message?.stop_reason)) continue;
     const humanId = ancestorId(entry);
+    if (!humanId) continue;
+    if (text.length) {
+      textualByHuman.set(humanId, [...(textualByHuman.get(humanId) || []), {
+        id: String(entry.uuid), content: text,
+      }]);
+    }
+    const delivered = entry.message.content
+      .filter(block => block?.type === "tool_use"
+        && deliveryTools.has(String(block?.name || ""))
+        && typeof block?.input?.text === "string"
+        && block.input.text.trim())
+      .map(block => ({ id: String(entry.uuid), content: [{ type: "text", text: block.input.text.trim() }] }));
+    if (delivered.length) deliveredByHuman.set(humanId, [...(deliveredByHuman.get(humanId) || []), ...delivered]);
+    if (!text.length || !new Set(["end_turn", "stop_sequence"]).has(entry?.message?.stop_reason)) continue;
     if (humanId) finalByHuman.set(humanId, entry);
   }
   return humans.flatMap(human => {
     const assistant = finalByHuman.get(String(human.uuid));
     if (!assistant) return [];
+    const assistantMessages = deliveredByHuman.get(String(human.uuid))
+      || textualByHuman.get(String(human.uuid))
+      || [{ id: String(assistant.uuid || ""), content: assistant.message.content }];
     return [{
       id: String(human.uuid),
       userId: String(human.uuid),
       assistantId: String(assistant.uuid || ""),
       userContent: human.message.content,
       assistantContent: assistant.message.content,
+      assistantMessages,
+      assistantIdAggregatesMessages: deliveredByHuman.has(String(human.uuid)),
     }];
   });
 }

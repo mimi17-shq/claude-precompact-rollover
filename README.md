@@ -30,6 +30,8 @@ The project is aimed first at ordinary 200k-context users. Its primary goal is t
 
 It does **not** call another model to summarize history. Pin and Hide are both message-level: Pin guarantees only the selected original message, while an unselected partner becomes a structural placeholder unless that turn is also inside the recent-token window. Hide removes only the selected message text and wins if the same message is also pinned. Memory writing remains an optional preparation reminder.
 
+For chat bridges that deliver multiple assistant replies inside one Claude turn, set `ROLLOVER_DELIVERY_TOOLS` to the comma-separated delivery tool names. Each delivered reply then keeps its own source message ID for Pin/Hide. A rebuild preserves only the selected reply text when the turn is outside the recent window, while mapping all selected source replies to the single valid assistant node created in the target session.
+
 ## The context assembly contract
 
 ```text
@@ -138,4 +140,4 @@ Never commit session JSONL, `.claude-rollover/`, runtime manifests, credentials,
 
 ## Current scope
 
-Version 0.2 provides the local context-plan contract, preview, mechanical rebuild, and integration manifests. It intentionally does not ship a network server or a specific UI: trusted local frontends, desktop apps, chat bridges, and supervisors can use the same versioned interface without exposing raw transcripts. Production-specific process switching and memory MCPs remain outside the core.
+Version 0.2.1 provides the local context-plan contract, preview, true message-level delivery-reply selection, mechanical rebuild, and integration manifests. It intentionally does not ship a network server or a specific UI: trusted local frontends, desktop apps, chat bridges, and supervisors can use the same versioned interface without exposing raw transcripts. Production-specific process switching and memory MCPs remain outside the core.

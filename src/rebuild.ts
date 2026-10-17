@@ -14,6 +14,8 @@ import {
   HIDDEN_USER_PLACEHOLDER,
   normalizeContextPlan,
   selectContextTurns,
+  turnMessageIds,
+  visibleContextTurn,
 } from "./context-plan.mjs";
 
 const sourceSessionId = process.argv[2];
@@ -110,6 +112,44 @@ for (const entry of raw) {
   if (!human?.uuid) continue;
   const key = String(human.uuid);
   deliveredByHuman.set(key, [...(deliveredByHuman.get(key) || []), ...delivered]);
+}
+
+type AssistantMessage = { id: string; content: any[] };
+const textualMessagesByHuman = new Map<string, AssistantMessage[]>();
+const deliveredMessagesByHuman = new Map<string, AssistantMessage[]>();
+for (const entry of raw) {
+  if (entry?.type !== "assistant" || !entry?.uuid || !Array.isArray(entry?.message?.content)) continue;
+  const human = humanAncestor(entry);
+  if (!human?.uuid) continue;
+  const humanId = String(human.uuid);
+  const textBlocks = entry.message.content
+    .filter((block: any) => block?.type === "text" && typeof block?.text === "string");
+  if (textBlocks.length) {
+    textualMessagesByHuman.set(humanId, [...(textualMessagesByHuman.get(humanId) || []), {
+      id: String(entry.uuid), content: structuredClone(textBlocks),
+    }]);
+  }
+  const deliveredBlocks = entry.message.content
+    .filter((block: any) => block?.type === "tool_use"
+      && deliveryToolNames.has(String(block?.name || ""))
+      && typeof block?.input?.text === "string"
+      && block.input.text.trim())
+    .map((block: any) => ({ type: "text", text: String(block.input.text).trim() }));
+  if (deliveredBlocks.length) {
+    deliveredMessagesByHuman.set(humanId, [...(deliveredMessagesByHuman.get(humanId) || []), {
+      id: String(entry.uuid), content: deliveredBlocks,
+    }]);
+  }
+}
+
+function assistantMessagesForHuman(humanId: string): AssistantMessage[] {
+  const assistant = finalByHuman.get(humanId);
+  const messages = deliveredMessagesByHuman.get(humanId)
+    || textualMessagesByHuman.get(humanId);
+  if (messages?.length) return messages;
+  return assistant?.uuid && Array.isArray(assistant?.message?.content)
+    ? [{ id: String(assistant.uuid), content: structuredClone(assistant.message.content) }]
+    : [];
 }
 
 let overlayTurns = 0;
@@ -244,6 +284,9 @@ for (const human of allHumans) {
   availableConversationMessageIds.add(String(human.uuid));
   const assistant = finalByHuman.get(String(human.uuid));
   if (assistant?.uuid) availableConversationMessageIds.add(String(assistant.uuid));
+  for (const message of assistantMessagesForHuman(String(human.uuid))) {
+    availableConversationMessageIds.add(message.id);
+  }
 }
 const contextPlanIdCheck = contextPlan
   ? assertPlanIds(contextPlan, availableConversationMessageIds)
@@ -342,6 +385,11 @@ try {
 } catch (error: any) {
   if (error?.code !== "ENOENT") throw error;
 }
+const missingLegacyAnchorIds = [...anchorMessageUuids]
+  .filter(uuid => !availableConversationMessageIds.has(uuid));
+if (missingLegacyAnchorIds.length) {
+  throw new Error(`conversation anchors reference missing message ids: ${missingLegacyAnchorIds.join(",")}`);
+}
 for (const uuid of contextPlan?.hiddenMessageIds || []) excludedMessageUuids.add(uuid);
 
 const estimateTokens = (value: unknown): number => {
@@ -361,11 +409,12 @@ const eligibleTurns = forceScopedHumans.map(human => {
     assistantId: String(assistant?.uuid || ""),
     userContent: human?.message?.content,
     assistantContent: assistant?.message?.content,
+    assistantMessages: assistantMessagesForHuman(String(human.uuid)),
+    assistantIdAggregatesMessages: deliveredMessagesByHuman.has(String(human.uuid)),
   };
 });
 if (contextPlan) {
-  assertPlanIds(contextPlan, new Set(eligibleTurns.flatMap(turn =>
-    [turn.userId, turn.assistantId].filter(Boolean))));
+  assertPlanIds(contextPlan, new Set(eligibleTurns.flatMap(turnMessageIds)));
 }
 const turnSelection = selectContextTurns(eligibleTurns, {
   retainTokens: forceRecentTokens,
@@ -380,18 +429,23 @@ const retainedFinalByHuman = new Map<string, any>();
 for (const sourceHuman of humans) {
   const uuid = String(sourceHuman.uuid);
   const sourceAssistant = finalByHuman.get(uuid);
-  const assistantUuid = String(sourceAssistant?.uuid || "");
   const normal = normalTurnUuids.has(uuid);
-  const keepHuman = !excludedMessageUuids.has(uuid) && (normal || anchorMessageUuids.has(uuid));
-  const keepAssistant = Boolean(sourceAssistant) && !excludedMessageUuids.has(assistantUuid)
-    && (normal || anchorMessageUuids.has(assistantUuid));
-  if (!keepHuman && !keepAssistant) continue;
+  const sourceTurn = eligibleTurns.find(turn => turn.id === uuid)!;
+  const visible = visibleContextTurn(sourceTurn, {
+    recent: normal,
+    pinnedMessageIds: anchorMessageUuids,
+    hiddenMessageIds: excludedMessageUuids,
+  });
+  if (!visible.userVisible && !visible.assistantVisible) continue;
   const human = structuredClone(sourceHuman);
-  if (!keepHuman) human.message = { ...structuredClone(human.message), content: omittedUserContent };
+  if (!visible.userVisible) human.message = { ...structuredClone(human.message), content: omittedUserContent };
   retainedHumans.push(human);
   if (sourceAssistant) {
     const assistant = structuredClone(sourceAssistant);
-    if (!keepAssistant) assistant.message = { ...structuredClone(assistant.message), content: omittedAssistantContent };
+    assistant.message = {
+      ...structuredClone(assistant.message),
+      content: visible.assistantVisible ? structuredClone(visible.assistantContent) : omittedAssistantContent,
+    };
     retainedFinalByHuman.set(uuid, assistant);
   }
 }
@@ -497,19 +551,30 @@ const sourceDigest = textDigest(humans.flatMap(human => {
 const targetDigest = textDigest(linked.map((item: any) => item.message?.content));
 if (sourceDigest !== targetDigest) throw new Error("message digest mismatch");
 
+const sourceToTargetMessageId = new Map<string, string>();
+for (let index = 0; index < humans.length; index += 1) {
+  const human = humans[index];
+  const linkedUser = linkedUsers[index];
+  const linkedAssistant = linkedAssistants[index];
+  if (linkedUser?.uuid) sourceToTargetMessageId.set(String(human.uuid), String(linkedUser.uuid));
+  if (linkedAssistant?.uuid) {
+    const humanId = String(human.uuid);
+    const finalAssistant = finalByHuman.get(humanId);
+    if (finalAssistant?.uuid) sourceToTargetMessageId.set(String(finalAssistant.uuid), String(linkedAssistant.uuid));
+    for (const message of assistantMessagesForHuman(humanId)) {
+      sourceToTargetMessageId.set(message.id, String(linkedAssistant.uuid));
+    }
+  }
+}
 const anchorTargets: any[] = [];
-const sourceSequence = humans.flatMap(human => {
-  const assistant = finalByHuman.get(String(human.uuid));
-  return assistant ? [human, assistant] : [human];
-});
 for (const anchor of anchorConfigs) {
  try {
-  const anchorIndex = sourceSequence.findIndex(entry => String(entry?.uuid || "") === String(anchor?.source_uuid || ""));
-  if (anchorIndex >= 0 && linked[anchorIndex]?.uuid) {
+  const targetMessageId = sourceToTargetMessageId.get(String(anchor?.source_uuid || ""));
+  if (targetMessageId) {
     anchorTargets.push({
       ...anchor,
       session_id: targetSessionId,
-      source_uuid: linked[anchorIndex].uuid,
+      source_uuid: targetMessageId,
       previous_session_id: sourceSessionId,
       previous_source_uuid: anchor.source_uuid,
       rolled_at: new Date().toISOString(),
@@ -518,11 +583,11 @@ for (const anchor of anchorConfigs) {
  } catch {}
 }
 const pinnedMessageTargets = (contextPlan?.pinnedMessageIds || []).flatMap(sourceMessageId => {
-  const sourceIndex = sourceSequence.findIndex(entry => String(entry?.uuid || "") === sourceMessageId);
-  if (sourceIndex < 0 || !linked[sourceIndex]?.uuid) return [];
+  const targetMessageId = sourceToTargetMessageId.get(sourceMessageId);
+  if (!targetMessageId) return [];
   return [{
     sourceMessageId,
-    targetMessageId: String(linked[sourceIndex].uuid),
+    targetMessageId,
   }];
 });
 

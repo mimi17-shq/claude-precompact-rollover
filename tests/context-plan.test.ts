@@ -3,7 +3,9 @@ import {
   assertPlanIds,
   normalizeContextPlan,
   selectContextTurns,
+  turnMessageIds,
   typedTurnsFromEntries,
+  visibleContextTurn,
 } from "../src/context-plan.mjs";
 
 const turn = (id, size = 200) => ({
@@ -56,16 +58,24 @@ describe("context plan contract", () => {
     expect(selected.hiddenWins).toBe(true);
   });
 
-  test("extracts complete typed turns without exposing tool-only entries", () => {
+  test("exposes configured delivery replies as individually selectable messages", () => {
     const entries = [
       { type: "user", uuid: "u1", parentUuid: null, origin: { kind: "human" }, promptSource: "typed", message: { content: "hello" } },
-      { type: "assistant", uuid: "tool", parentUuid: "u1", message: { stop_reason: null, content: [{ type: "tool_use", name: "x" }] } },
+      { type: "assistant", uuid: "tool", parentUuid: "u1", message: { stop_reason: null, content: [{ type: "tool_use", name: "deliver", input: { text: "first reply" } }] } },
       { type: "assistant", uuid: "a1", parentUuid: "tool", message: { stop_reason: "end_turn", content: [{ type: "text", text: "world" }] } },
     ];
-    expect(typedTurnsFromEntries(entries)).toEqual([expect.objectContaining({
+    const [extracted] = typedTurnsFromEntries(entries, { deliveryToolNames: ["deliver"] });
+    expect(extracted).toEqual(expect.objectContaining({
       id: "u1",
       userId: "u1",
       assistantId: "a1",
-    })]);
+      assistantMessages: [{ id: "tool", content: [{ type: "text", text: "first reply" }] }],
+    }));
+    expect(turnMessageIds(extracted)).toEqual(["u1", "a1", "tool"]);
+    expect(visibleContextTurn(extracted, { pinnedMessageIds: ["tool"] })).toMatchObject({
+      userVisible: false,
+      assistantVisible: true,
+      assistantContent: [{ type: "text", text: "first reply" }],
+    });
   });
 });
