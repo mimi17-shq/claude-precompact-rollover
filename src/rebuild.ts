@@ -8,14 +8,29 @@ import { createHash } from "node:crypto";
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import path from "node:path";
+import {
+  assertPlanIds,
+  HIDDEN_ASSISTANT_PLACEHOLDER,
+  HIDDEN_USER_PLACEHOLDER,
+  normalizeContextPlan,
+  selectContextTurns,
+} from "./context-plan.mjs";
 
 const sourceSessionId = process.argv[2];
 const dir = path.resolve(process.argv[3] || process.cwd());
 const sourceMode = process.argv[4] || "typed";
 const runtimeDir = process.argv[5] || path.join(dir, "rebuild-runtime");
 const overlaySessionId = process.argv[6] || "";
+const contextPlanPath = String(process.env.ROLLOVER_CONTEXT_PLAN_PATH || "").trim();
+let contextPlan: ReturnType<typeof normalizeContextPlan> | null = null;
+if (contextPlanPath) {
+  contextPlan = normalizeContextPlan(JSON.parse(await readFile(path.resolve(contextPlanPath), "utf8")), {
+    sourceSessionId,
+  });
+}
 const forceRecentTokens = Math.max(1000, Math.min(100000, Number(
-  process.env.ROLLOVER_RETAIN_TOKENS || process.env.THREAD_REBUILD_FORCE_RECENT_TOKENS || 12000,
+  process.env.ROLLOVER_RETAIN_TOKENS || contextPlan?.retainTokens
+    || process.env.THREAD_REBUILD_FORCE_RECENT_TOKENS || 12000,
 )));
 const nextModel = String(process.env.ROLLOVER_NEXT_MODEL || "").trim();
 const nextEffort = String(process.env.ROLLOVER_NEXT_EFFORT || "").trim();
@@ -213,18 +228,33 @@ if (!forceRecentTokens) try {
 
 let anchorConfigs: any[] = [];
 const anchorMessageUuids = new Set<string>();
-const anchorHumanUuids = new Set<string>();
 try {
   const loaded = JSON.parse(await readFile(path.join(runtimeDir, "conversation-anchor.json"), "utf8"));
   anchorConfigs = Array.isArray(loaded) ? loaded : loaded ? [loaded] : [];
   for (const anchor of anchorConfigs) {
     const anchorUuid = String(anchor?.source_uuid || "");
     if (anchorUuid) anchorMessageUuids.add(anchorUuid);
-    const direct = allHumans.find(human => String(human.uuid) === anchorUuid);
-    const ancestor = direct || humanAncestor(byUuid.get(anchorUuid));
-    if (ancestor?.uuid) anchorHumanUuids.add(String(ancestor.uuid));
   }
-} catch {}
+} catch (error: any) {
+  if (error?.code !== "ENOENT") throw error;
+}
+
+const availableConversationMessageIds = new Set<string>();
+for (const human of allHumans) {
+  availableConversationMessageIds.add(String(human.uuid));
+  const assistant = finalByHuman.get(String(human.uuid));
+  if (assistant?.uuid) availableConversationMessageIds.add(String(assistant.uuid));
+}
+const contextPlanIdCheck = contextPlan
+  ? assertPlanIds(contextPlan, availableConversationMessageIds)
+  : { pinHideConflicts: [] as string[] };
+if (contextPlan) {
+  for (const pinnedId of contextPlan.pinnedMessageIds) {
+    // Pins are message-level. Selecting the containing turn keeps the graph
+    // valid, while only this exact message is guaranteed to retain its text.
+    anchorMessageUuids.add(pinnedId);
+  }
+}
 
 function channelChatDigest(human: any): string {
   const content = human?.message?.content;
@@ -309,7 +339,10 @@ try {
     const uuid = String(item?.source_uuid || "");
     if (uuid) excludedMessageUuids.add(uuid);
   }
-} catch {}
+} catch (error: any) {
+  if (error?.code !== "ENOENT") throw error;
+}
+for (const uuid of contextPlan?.hiddenMessageIds || []) excludedMessageUuids.add(uuid);
 
 const estimateTokens = (value: unknown): number => {
   const text = JSON.stringify(value ?? "");
@@ -317,42 +350,30 @@ const estimateTokens = (value: unknown): number => {
   for (const char of text) if (char.charCodeAt(0) < 128) ascii += 1;
   return Math.ceil(ascii / 4) + (text.length - ascii);
 };
-const omittedUserContent = '<thread-rebuild-omitted role="user" />';
-const omittedAssistantContent = [{ type: "text", text: "<thread-rebuild-omitted role=\"assistant\" />" }];
+const omittedUserContent = HIDDEN_USER_PLACEHOLDER;
+const omittedAssistantContent = HIDDEN_ASSISTANT_PLACEHOLDER;
 const normalTurnUuids = new Set<string>();
-const eligibleHumans = forceScopedHumans.filter((human) => {
-  const uuid = String(human.uuid);
-  normalTurnUuids.add(uuid);
-  return true;
+const eligibleTurns = forceScopedHumans.map(human => {
+  const assistant = finalByHuman.get(String(human.uuid));
+  return {
+    id: String(human.uuid),
+    userId: String(human.uuid),
+    assistantId: String(assistant?.uuid || ""),
+    userContent: human?.message?.content,
+    assistantContent: assistant?.message?.content,
+  };
 });
-const retainedTokenEstimate = (human: any, normal: boolean): number => {
-  const humanUuid = String(human?.uuid || "");
-  const assistant = finalByHuman.get(humanUuid);
-  const assistantUuid = String(assistant?.uuid || "");
-  const keepHuman = !excludedMessageUuids.has(humanUuid) && (normal || anchorMessageUuids.has(humanUuid));
-  const keepAssistant = Boolean(assistant) && !excludedMessageUuids.has(assistantUuid)
-    && (normal || anchorMessageUuids.has(assistantUuid));
-  if (!keepHuman && !keepAssistant) return 0;
-  return estimateTokens(keepHuman ? human?.message?.content : omittedUserContent)
-    + (assistant ? estimateTokens(keepAssistant ? assistant?.message?.content : omittedAssistantContent) : 0);
-};
-let humans = eligibleHumans;
-if (forceRecentTokens) {
-  const keep = new Set<string>(anchorHumanUuids);
-  normalTurnUuids.clear();
-  let estimated = eligibleHumans
-    .filter(human => keep.has(String(human.uuid)))
-    .reduce((sum, human) => sum + retainedTokenEstimate(human, false), 0);
-  for (let index = eligibleHumans.length - 1; index >= 0 && estimated < forceRecentTokens; index -= 1) {
-    const human = eligibleHumans[index];
-    const uuid = String(human.uuid);
-    if (keep.has(uuid)) continue;
-    keep.add(uuid);
-    normalTurnUuids.add(uuid);
-    estimated += retainedTokenEstimate(human, true);
-  }
-  humans = eligibleHumans.filter(human => keep.has(String(human.uuid)));
+if (contextPlan) {
+  assertPlanIds(contextPlan, new Set(eligibleTurns.flatMap(turn =>
+    [turn.userId, turn.assistantId].filter(Boolean))));
 }
+const turnSelection = selectContextTurns(eligibleTurns, {
+  retainTokens: forceRecentTokens,
+  pinnedMessageIds: [...anchorMessageUuids],
+  hiddenMessageIds: [...excludedMessageUuids],
+});
+for (const turnId of turnSelection.recentTurnIds) normalTurnUuids.add(turnId);
+let humans = forceScopedHumans.filter(human => turnSelection.selectedTurnIds.has(String(human.uuid)));
 
 const retainedHumans: any[] = [];
 const retainedFinalByHuman = new Map<string, any>();
@@ -477,12 +498,12 @@ const targetDigest = textDigest(linked.map((item: any) => item.message?.content)
 if (sourceDigest !== targetDigest) throw new Error("message digest mismatch");
 
 const anchorTargets: any[] = [];
+const sourceSequence = humans.flatMap(human => {
+  const assistant = finalByHuman.get(String(human.uuid));
+  return assistant ? [human, assistant] : [human];
+});
 for (const anchor of anchorConfigs) {
  try {
-  const sourceSequence = humans.flatMap(human => {
-    const assistant = finalByHuman.get(String(human.uuid));
-    return assistant ? [human, assistant] : [human];
-  });
   const anchorIndex = sourceSequence.findIndex(entry => String(entry?.uuid || "") === String(anchor?.source_uuid || ""));
   if (anchorIndex >= 0 && linked[anchorIndex]?.uuid) {
     anchorTargets.push({
@@ -496,6 +517,14 @@ for (const anchor of anchorConfigs) {
   }
  } catch {}
 }
+const pinnedMessageTargets = (contextPlan?.pinnedMessageIds || []).flatMap(sourceMessageId => {
+  const sourceIndex = sourceSequence.findIndex(entry => String(entry?.uuid || "") === sourceMessageId);
+  if (sourceIndex < 0 || !linked[sourceIndex]?.uuid) return [];
+  return [{
+    sourceMessageId,
+    targetMessageId: String(linked[sourceIndex].uuid),
+  }];
+});
 
 await mkdir(transcriptDir, { recursive: true, mode: 0o700 });
 await mkdir(runtimeDir, { recursive: true, mode: 0o700 });
@@ -533,8 +562,32 @@ const manifest = {
   target_digest: targetDigest,
   transcript_path: transcriptPath,
   anchor_targets: anchorTargets,
+  context_plan_applied: Boolean(contextPlan),
+  pinned_messages: contextPlan?.pinnedMessageIds.length || 0,
+  hidden_messages: contextPlan?.hiddenMessageIds.length || 0,
+  pin_hide_conflicts: contextPlanIdCheck.pinHideConflicts,
+  pinned_message_targets: pinnedMessageTargets,
 };
 await writeFile(path.join(runtimeDir, "candidate-manifest.json"), JSON.stringify(manifest, null, 2) + "\n", { mode: 0o600 });
+await writeFile(path.join(runtimeDir, "context-manifest.json"), JSON.stringify({
+  version: 1,
+  createdAt: manifest.created_at,
+  sourceSessionId,
+  targetSessionId,
+  strategy: "recent-complete-turns-plus-message-pins",
+  hidePrecedence: "hide-wins",
+  retainTokens: forceRecentTokens,
+  estimatedRetainedTokens,
+  retainedTurns: humans.length,
+  retainedPairs: completePairs.length,
+  pinnedMessageIds: contextPlan?.pinnedMessageIds || [],
+  hiddenMessageIds: contextPlan?.hiddenMessageIds || [],
+  pinHideConflicts: contextPlanIdCheck.pinHideConflicts,
+  pinnedMessageTargets,
+  sourceDigest,
+  targetDigest,
+  digestMatch: sourceDigest === targetDigest,
+}, null, 2) + "\n", { mode: 0o600 });
 await writeFile(path.join(runtimeDir, "next-inheritance-baseline.json"), JSON.stringify({
   version: 2,
   session_id: targetSessionId,

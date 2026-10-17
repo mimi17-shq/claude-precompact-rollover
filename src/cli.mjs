@@ -5,6 +5,12 @@ import path from "node:path";
 import process from "node:process";
 import { fileURLToPath } from "node:url";
 import { loadConfig } from "./config.mjs";
+import {
+  assertPlanIds,
+  normalizeContextPlan,
+  selectContextTurns,
+  typedTurnsFromEntries,
+} from "./context-plan.mjs";
 import { decideAction, inspectEntries, parseJsonl, profileForModel } from "./core.mjs";
 
 const here = path.dirname(fileURLToPath(import.meta.url));
@@ -36,13 +42,20 @@ async function inspectTranscript(pathname) {
   return inspectEntries(parsed.entries);
 }
 
+async function loadPlan(pathname, sourceSessionId) {
+  if (!pathname) return null;
+  const parsed = JSON.parse(await readFile(path.resolve(pathname), "utf8"));
+  return normalizeContextPlan(parsed, { sourceSessionId });
+}
+
 async function runRebuild(options, config) {
   if (!options.session) throw new Error("--session is required");
   const cwd = path.resolve(options.cwd || process.cwd());
   const runtime = path.resolve(options.runtime || path.join(cwd, ".claude-rollover"));
-  const retainTokens = Number(options.retainTokens || config.retainTokens);
-  const nextModel = String(options.model || config.nextWindow.model || "");
-  const nextEffort = String(options.effort || config.nextWindow.effort || "");
+  const plan = await loadPlan(options.plan, options.session);
+  const retainTokens = Number(options.retainTokens || plan?.retainTokens || config.retainTokens);
+  const nextModel = String(options.model || plan?.nextWindow.model || config.nextWindow.model || "");
+  const nextEffort = String(options.effort || plan?.nextWindow.effort || config.nextWindow.effort || "");
   if (options.transcript) {
     await mkdir(runtime, { recursive: true, mode: 0o700 });
     const backup = path.join(runtime, `source-before-rollover-${Date.now()}.jsonl`);
@@ -57,6 +70,7 @@ async function runRebuild(options, config) {
       ROLLOVER_RETAIN_TOKENS: String(retainTokens),
       ROLLOVER_NEXT_MODEL: nextModel,
       ROLLOVER_NEXT_EFFORT: nextEffort,
+      ROLLOVER_CONTEXT_PLAN_PATH: options.plan ? path.resolve(options.plan) : "",
     },
   });
   const code = await new Promise((resolve, reject) => {
@@ -84,8 +98,9 @@ function help() {
 
 Commands:
   status  --transcript FILE [--config FILE] [--state FILE]
-  watch   --transcript FILE --session ID [--cwd DIR] [--config FILE]
-  rebuild --session ID [--cwd DIR] [--retain-tokens N] [--model NAME] [--effort LEVEL]
+  watch   --transcript FILE --session ID [--cwd DIR] [--config FILE] [--plan FILE]
+  preview --transcript FILE --session ID --plan FILE
+  rebuild --session ID [--cwd DIR] [--plan FILE] [--retain-tokens N] [--model NAME] [--effort LEVEL]
   hook    [--config FILE] [--state FILE]   Read Claude hook JSON from stdin
 
 The tool never terminates or restarts Claude by itself. A successful rebuild writes
@@ -143,6 +158,40 @@ async function main() {
   const config = await loadConfig(options.config);
   if (command === "rebuild") {
     console.log(JSON.stringify(await runRebuild(options, config), null, 2));
+    return;
+  }
+  if (command === "preview") {
+    if (!options.transcript || !options.session || !options.plan) {
+      throw new Error("preview requires --transcript, --session, and --plan");
+    }
+    const parsed = parseJsonl(await readFile(path.resolve(options.transcript), "utf8"));
+    if (parsed.invalidLines.length) throw new Error(`invalid JSONL lines: ${parsed.invalidLines.join(",")}`);
+    const plan = await loadPlan(options.plan, options.session);
+    const turns = typedTurnsFromEntries(parsed.entries);
+    const available = new Set(turns.flatMap(turn => [turn.userId, turn.assistantId]).filter(Boolean));
+    const idCheck = assertPlanIds(plan, available);
+    const retainTokens = Number(options.retainTokens || plan.retainTokens || config.retainTokens);
+    const selection = selectContextTurns(turns, {
+      retainTokens,
+      pinnedMessageIds: plan.pinnedMessageIds,
+      hiddenMessageIds: plan.hiddenMessageIds,
+    });
+    const retained = turns.filter(turn => selection.selectedTurnIds.has(turn.id));
+    console.log(JSON.stringify({
+      version: 1,
+      sourceSessionId: options.session,
+      strategy: "recent-complete-turns-plus-message-pins",
+      hidePrecedence: "hide-wins",
+      retainTokens,
+      sourceTurns: turns.length,
+      retainedTurns: retained.length,
+      retainedMessages: retained.length * 2,
+      pinnedMessages: plan.pinnedMessageIds.length,
+      hiddenMessages: plan.hiddenMessageIds.length,
+      pinHideConflicts: idCheck.pinHideConflicts,
+      estimatedRetainedTokens: selection.estimatedTokens,
+      retainedTurnIds: retained.map(turn => turn.id),
+    }, null, 2));
     return;
   }
   if (command === "watch") {

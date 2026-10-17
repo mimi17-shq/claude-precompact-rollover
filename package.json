@@ -1,11 +1,14 @@
 {
   "name": "claude-precompact-rollover",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "private": true,
   "description": "Preserve recent verbatim Claude Code conversation before or after context compaction.",
   "type": "module",
   "bin": {
     "claude-precompact-rollover": "src/cli.mjs"
+  },
+  "exports": {
+    "./context-plan": "./src/context-plan.mjs"
   },
   "scripts": {
     "test": "bun test",

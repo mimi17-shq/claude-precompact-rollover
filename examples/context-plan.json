@@ -1,0 +1,15 @@
+{
+  "version": 1,
+  "sourceSessionId": "replace-with-source-session-id",
+  "retainTokens": 12000,
+  "pinnedMessageIds": [
+    "replace-with-message-uuid-to-keep"
+  ],
+  "hiddenMessageIds": [
+    "replace-with-message-uuid-to-hide"
+  ],
+  "nextWindow": {
+    "model": "replace-with-your-next-model-id",
+    "effort": "high"
+  }
+}

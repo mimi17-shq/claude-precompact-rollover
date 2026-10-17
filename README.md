@@ -1,18 +1,18 @@
 # claude-precompact-rollover
 
-Preserve the latest **X tokens of verbatim conversation** before Claude Code compacts a long session—or recover those turns after a large tool result unexpectedly triggers compaction.
+Build the next Claude Code window from **recent verbatim turns + pinned context − hidden noise**, then verify the handoff before switching.
 
-The project is aimed first at ordinary 200k-context users who would rather start a clean window than spend quota recovering the tone and details lost in an automatic summary.
+The project is aimed first at ordinary 200k-context users. Its primary goal is to avoid spending time and quota on repeated automatic compaction; its second goal is to carry forward the exact wording that holds tone, names, promises, preferences, and other continuity cues instead of trusting one generated summary to choose them.
 
 ## 产品视角
 
-针对 Claude Code 长会话自动压缩后细节可能丢失的问题，我提出并定义了分阶段提醒、完整原文保留、压缩后救援和 SHA-256 内容校验流程，让上下文接续可以被检查和验证。
+针对 Claude Code 200k 长会话反复自动压缩、等待时间长且可能丢失原话的问题，我提出并定义了分阶段提醒、最近 X Token、Pin、Hide、压缩后救援和 SHA-256 内容校验流程。它不是替模型写另一份摘要，而是让用户自己决定下一窗口真正继承什么。
 
 我负责提出需求、确定产品方案与验收标准；代码实现和自动化测试由 AI 完成。完整过程见 **[中文产品案例：如何在自动压缩前安全接续长会话](docs/PRODUCT_CASE_ZH.md)**。
 
-<img src="assets/rollover-product-flow.svg" alt="Telegram 风格移动端自动换窗体验示意图：日常对话、记忆提醒、模型与 effort 选择、换窗完成后继续对话" width="100%">
+<img src="assets/rollover-product-flow.svg" alt="移动端上下文组装体验示意图：日常对话、记忆提醒、最近 Token 加 Pin 减 Hide、校验后换窗继续对话" width="100%">
 
-*合成体验示意图，不包含真实聊天内容；移动端交互属于集成层，本仓库提供换窗核心。*
+*合成体验示意图，不包含真实聊天内容；移动端界面属于集成层，本仓库提供可供界面接入的计划接口与换窗核心。*
 
 ## What it does
 
@@ -21,12 +21,40 @@ The project is aimed first at ordinary 200k-context users who would rather start
 - At 160k, waits for a complete assistant reply and prepares a rebuilt session.
 - If a tool call jumps past the safe range and compaction happens first, enters rescue mode and reads the original pre-compaction turns from the append-only transcript.
 - Keeps the latest configurable X tokens as complete user/assistant turns.
+- Accepts a versioned `context-plan.json`: pin older messages, hide selected noise, and choose the next model/effort from any local frontend or app.
+- Offers a metadata-only preview before rebuilding and returns source-to-target mappings for pinned messages afterward.
 - Excludes tool output floods, thinking blocks, compact summaries, and inherited usage counters.
 - Verifies a SHA-256 digest of source and rebuilt visible content before marking the target ready.
 - Lets the user choose the next model and effort independently of the source window.
 - Disables automatic rollover for configured 1M-context models by default. Manual rebuild and post-compaction rescue remain available.
 
-It does **not** call another model to summarize history. Memory writing is deliberately an optional preparation reminder; capsule generation can be added later as an adapter.
+It does **not** call another model to summarize history. Pin and Hide are both message-level: Pin guarantees only the selected original message, while an unselected partner becomes a structural placeholder unless that turn is also inside the recent-token window. Hide removes only the selected message text and wins if the same message is also pinned. Memory writing remains an optional preparation reminder.
+
+## The context assembly contract
+
+```text
+latest X tokens + pinned messages - hidden messages
+                         ↓
+                mechanical SDK fork
+                         ↓
+        source digest == target digest → ready
+```
+
+Copy [`examples/context-plan.json`](examples/context-plan.json), then let a trusted local UI, app, or supervisor write message IDs into it. The plan contains no conversation text and is bound to one source session.
+
+```bash
+bun src/cli.mjs preview \
+  --session <session-id> \
+  --transcript ~/.claude/projects/<project>/<session-id>.jsonl \
+  --plan context-plan.json
+
+bun src/cli.mjs rebuild \
+  --session <session-id> \
+  --cwd /path/to/project \
+  --plan context-plan.json
+```
+
+`preview` prints selection metadata without printing message text. A successful rebuild writes `context-manifest.json` with counts, digest verification, and old-to-new IDs for pinned messages. See **[Context plan v1](docs/CONTEXT_PLAN.md)** for the schema and precedence rules.
 
 ## Safety model
 
@@ -70,6 +98,7 @@ bun src/cli.mjs watch \
   --session <session-id> \
   --cwd /path/to/project \
   --transcript ~/.claude/projects/<project>/<session-id>.jsonl \
+  --plan context-plan.json \
   --config rollover.config.json
 ```
 
@@ -87,6 +116,7 @@ Resume the target using the model and effort recorded in that file. Keeping proc
 bun src/cli.mjs rebuild \
   --session <session-id> \
   --cwd /path/to/project \
+  --plan context-plan.json \
   --retain-tokens 12000 \
   --model <next-model-id> \
   --effort high
@@ -108,4 +138,4 @@ Never commit session JSONL, `.claude-rollover/`, runtime manifests, credentials,
 
 ## Current scope
 
-Version 0.1 focuses on typed Claude Code sessions and configurable external delivery adapters. Production-specific chat bridges, model-choice UIs, memory MCPs, and service supervisors intentionally remain out of the core.
+Version 0.2 provides the local context-plan contract, preview, mechanical rebuild, and integration manifests. It intentionally does not ship a network server or a specific UI: trusted local frontends, desktop apps, chat bridges, and supervisors can use the same versioned interface without exposing raw transcripts. Production-specific process switching and memory MCPs remain outside the core.

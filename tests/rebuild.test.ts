@@ -52,16 +52,25 @@ describe("mechanical rebuild", () => {
     const sessionId = "30000000-0000-4000-8000-000000000001";
     const projectKey = cwd.replace(/[^A-Za-z0-9]/g, "-");
     const transcriptDir = path.join(configDir, "projects", projectKey);
+    const planPath = path.join(root, "context-plan.json");
     await mkdir(cwd, { recursive: true });
     await mkdir(transcriptDir, { recursive: true });
     const entries = [
-      ...pair(sessionId, cwd, 1, 400),
-      ...pair(sessionId, cwd, 2, 400),
+      ...pair(sessionId, cwd, 1, 3000),
+      ...pair(sessionId, cwd, 2, 3000),
       { type: "system", subtype: "compact_boundary", uuid: "40000000-0000-4000-8000-000000000001", sessionId, cwd },
       { type: "user", uuid: "50000000-0000-4000-8000-000000000001", parentUuid: null, sessionId, cwd, isCompactSummary: true, message: { role: "user", content: "automatic compact summary" } },
       ...pair(sessionId, cwd, 3, 20),
     ];
     await writeFile(path.join(transcriptDir, `${sessionId}.jsonl`), entries.map(entry => JSON.stringify(entry)).join("\n") + "\n");
+    await writeFile(planPath, JSON.stringify({
+      version: 1,
+      sourceSessionId: sessionId,
+      retainTokens: 1000,
+      pinnedMessageIds: ["10000000-0000-4000-8000-000000000001"],
+      hiddenMessageIds: ["20000000-0000-4000-8000-000000000003"],
+      nextWindow: { model: "synthetic-next", effort: "high" },
+    }));
 
     const child = Bun.spawn([
       process.execPath,
@@ -72,7 +81,12 @@ describe("mechanical rebuild", () => {
       runtime,
     ], {
       cwd: path.resolve("."),
-      env: { ...Bun.env, CLAUDE_CONFIG_DIR: configDir, ROLLOVER_RETAIN_TOKENS: "1000" },
+      env: {
+        ...Bun.env,
+        CLAUDE_CONFIG_DIR: configDir,
+        ROLLOVER_RETAIN_TOKENS: "1000",
+        ROLLOVER_CONTEXT_PLAN_PATH: planPath,
+      },
       stdout: "pipe",
       stderr: "pipe",
     });
@@ -84,7 +98,22 @@ describe("mechanical rebuild", () => {
     expect(manifest.retained_users).toBeGreaterThan(0);
     expect(manifest.retained_users).toBeLessThanOrEqual(3);
     expect(manifest.stripped_inherited_usage_entries).toBe(manifest.retained_pairs);
+    expect(manifest.context_plan_applied).toBe(true);
+    expect(manifest.pinned_messages).toBe(1);
+    expect(manifest.hidden_messages).toBe(1);
     const rebuilt = await readFile(manifest.transcript_path, "utf8");
     expect(rebuilt).not.toContain("automatic compact summary");
+    expect(rebuilt).not.toContain("assistant-1-");
+    expect(rebuilt).not.toContain("assistant-3-");
+    expect(rebuilt).toContain("context-omitted");
+    expect(rebuilt).toContain("user-1-");
+    expect(rebuilt).toContain("user-3-");
+    const contextManifest = JSON.parse(await readFile(path.join(runtime, "context-manifest.json"), "utf8"));
+    expect(contextManifest).toMatchObject({
+      strategy: "recent-complete-turns-plus-message-pins",
+      hidePrecedence: "hide-wins",
+      digestMatch: true,
+    });
+    expect(contextManifest.pinnedMessageTargets).toHaveLength(1);
   }, 20_000);
 });

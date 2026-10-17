@@ -1,0 +1,51 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/mimi17-shq/claude-precompact-rollover/schemas/context-plan.schema.json",
+  "title": "Claude pre-compaction context plan",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["version", "sourceSessionId"],
+  "properties": {
+    "version": {
+      "const": 1
+    },
+    "sourceSessionId": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 256
+    },
+    "retainTokens": {
+      "type": "integer",
+      "minimum": 1000,
+      "maximum": 100000
+    },
+    "pinnedMessageIds": {
+      "type": "array",
+      "uniqueItems": true,
+      "items": {
+        "type": "string",
+        "minLength": 1,
+        "maxLength": 256
+      },
+      "default": []
+    },
+    "hiddenMessageIds": {
+      "type": "array",
+      "uniqueItems": true,
+      "items": {
+        "type": "string",
+        "minLength": 1,
+        "maxLength": 256
+      },
+      "default": []
+    },
+    "nextWindow": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "model": { "type": "string" },
+        "effort": { "type": "string" }
+      }
+    }
+  }
+}
